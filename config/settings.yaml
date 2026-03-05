@@ -1,0 +1,21 @@
+# PAVUI 配置文件
+
+# 语言设置
+language: zh  # zh | en
+
+# LLM服务配置
+llm:
+  default_provider: deepseek
+  providers:
+    deepseek:
+      api_key: ""  # 或使用环境变量 DEEPSEEK_API_KEY
+      base_url: "https://api.deepseek.com/v1"
+      model: "deepseek-chat"
+
+# 项目存储
+storage:
+  projects_dir: "~/pavui_projects"
+
+# UI设置
+ui:
+  theme: dark  # dark | light

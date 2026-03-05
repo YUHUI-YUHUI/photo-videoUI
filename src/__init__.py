@@ -1,0 +1,3 @@
+"""PAVUI - AI Video Generation Workflow Platform"""
+
+__version__ = "0.1.0"
