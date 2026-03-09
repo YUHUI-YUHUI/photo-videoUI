@@ -1,4 +1,4 @@
-"""Script generation service with three-stage process"""
+"""Script generation service with multi-stage process for long text"""
 
 from typing import Callable
 
@@ -15,53 +15,25 @@ from .translator import Translator
 
 
 class ScriptService:
-    """Script generation service - three-stage generation"""
+    """Script generation service - optimized for long text processing"""
 
     # ========== Prompt Templates ==========
 
-    OUTLINE_SYSTEM_PROMPT = """你是一个专业的短视频脚本创作者。
-根据用户的主题创作一个适合短视频的故事大纲。
+    # Stage 1: Extract all characters and locations from full text
+    EXTRACT_ELEMENTS_SYSTEM_PROMPT = """你是一个专业的文本分析师。
+从用户提供的文本中提取所有角色和场景的详细设定，用于后续AI图像生成。
 
-要求：
-1. 故事完整，有开头、发展、高潮、结尾
-2. 控制在3-8个场景
-3. 适合视觉呈现，包含具体的画面元素
-4. 情节紧凑，适合1-2分钟短视频
-5. 角色设定要有特点，易于识别
+角色提取要求：
+1. 提取所有有名字或重要的角色
+2. 外观描述要详细具体，包含"DNA锚点"便于保持一致性
+3. DNA锚点包括：脸型、发型/发色、标志性配饰、服装特征
+4. 如果原文没有描述，根据角色性格和背景合理推断
+5. 每个角色的appearance必须完整填写所有字段
 
-输出格式：
-## 标题
-[视频标题]
-
-## 简介
-[一句话简介]
-
-## 故事大纲
-[详细的故事大纲，分段落描述主要情节]
-
-## 主要角色
-- 角色1（名字）：[外观特征、性格特点]
-- 角色2（名字）：[外观特征、性格特点]
-（如有更多角色继续列出）
-
-## 主要场景
-- 场景1：[场景名称和描述]
-- 场景2：[场景名称和描述]
-（如有更多场景继续列出）"""
-
-    EXTRACT_ELEMENTS_SYSTEM_PROMPT = """你是一个专业的视频分镜师。
-从故事大纲中提取所有角色和场景的详细设定，用于AI图像生成。
-
-角色设定要求：
-1. 外观描述要详细具体，包含"DNA锚点"便于保持一致性
-2. DNA锚点包括：脸型、发型/发色、标志性配饰、服装颜色
-3. 特征描述使用固定词汇，避免同义词替换
-4. 每个角色的appearance必须完整填写所有字段
-
-场景设定要求：
-1. 包含时间、光线、氛围
-2. 描述具体的环境元素
-3. 生成用于AI图像的参考prompt
+场景提取要求：
+1. 提取所有出现的场景/地点
+2. 包含时间、光线、氛围
+3. 描述具体的环境元素
 
 输出严格的JSON格式：
 {
@@ -72,13 +44,13 @@ class ScriptService:
       "role": "主角/配角/群演",
       "appearance": {
         "gender": "男/女",
-        "age": "年龄描述，如25岁左右",
-        "height": "体型描述，如中等身材",
-        "face": "脸型和五官，如圆脸、浓眉大眼",
-        "hair": "发型和发色，如黑色短发",
-        "clothing": "服装描述，如蓝色卫衣、牛仔裤",
-        "accessories": "配饰，如黑框眼镜",
-        "distinctive_features": "标志性特征，如左脸有一颗小痣"
+        "age": "年龄描述",
+        "height": "体型描述",
+        "face": "脸型和五官",
+        "hair": "发型和发色",
+        "clothing": "服装描述",
+        "accessories": "配饰",
+        "distinctive_features": "标志性特征"
       },
       "personality": "性格描述"
     }
@@ -88,105 +60,92 @@ class ScriptService:
       "id": "loc_001",
       "name": "场景名称",
       "description": "详细描述",
-      "time_of_day": "时间，如下午",
-      "atmosphere": "氛围，如温馨、安静",
+      "time_of_day": "时间",
+      "atmosphere": "氛围",
       "reference_prompt_zh": "用于AI图像生成的中文prompt"
     }
   ]
 }"""
 
-    SCENES_SYSTEM_PROMPT = """你是一个专业的分镜脚本师。
-根据故事大纲、角色设定和场景设定，生成详细的分镜脚本。
+    # Stage 2: Generate scene splitting plan
+    SCENE_SPLIT_SYSTEM_PROMPT = """你是一个专业的分镜规划师。
+根据用户提供的文本内容，规划如何将其切分成适合短视频的场景。
 
-每个分镜要求：
-1. 使用已定义的场景和角色（通过ID引用）
-2. 镜头类型：远景/全景/中景/近景/特写
-3. 镜头运动：固定/推进/拉远/平移/俯仰
-4. 画面描述要详细，包含完整的角色外观描述
-5. 旁白或对话要与画面配合
-6. 生成用于AI图像生成的中文prompt
+要求：
+1. 每个场景对应原文的一段内容
+2. 标注每个场景在原文中的起始和结束位置（用原文中的关键句子标记）
+3. 场景数量控制在5-15个
+4. 每个场景应该有独立的画面感
+5. 场景之间要有连贯性
 
 输出严格的JSON格式：
 {
-  "title": "视频标题",
-  "summary": "一句话简介",
+  "total_scenes": 8,
   "scenes": [
     {
       "scene_id": 1,
+      "title": "场景标题/概述",
+      "start_marker": "原文中该场景开始的句子或关键词",
+      "end_marker": "原文中该场景结束的句子或关键词",
       "location_id": "loc_001",
-      "character_ids": ["char_001"],
-      "duration": "5秒",
-      "shot_type": "中景",
-      "camera_movement": "固定",
-      "visual_description": "详细的画面描述",
-      "narration": "旁白内容，如果没有则为null",
-      "dialogue": {"char_001": "对话内容"},
-      "mood": "情绪氛围",
-      "image_prompt_zh": "用于AI图像生成的中文prompt，包含完整的角色外观描述和场景细节"
+      "character_ids": ["char_001", "char_002"],
+      "summary": "这个场景的简要描述"
     }
-  ],
-  "style_guide": {
-    "visual_style": "写实/动漫/3D等",
-    "color_palette": ["主色调1", "主色调2"],
-    "aspect_ratio": "16:9",
-    "target_duration": "总时长，如60秒"
-  }
+  ]
+}
+
+注意：start_marker和end_marker必须是原文中实际存在的文字片段，用于代码定位切割。"""
+
+    # Stage 3: Generate detailed scene description for each segment
+    SCENE_DETAIL_SYSTEM_PROMPT = """你是一个专业的分镜脚本师。
+根据提供的文本片段、角色设定和场景设定，生成这个场景的详细分镜描述。
+
+要求：
+1. 镜头类型：远景/全景/中景/近景/特写
+2. 镜头运动：固定/推进/拉远/平移/俯仰
+3. 画面描述要详细，包含完整的角色外观描述
+4. 生成用于AI图像生成的中文prompt
+5. image_prompt_zh必须包含角色的完整外观特征
+
+输出严格的JSON格式：
+{
+  "duration": "5秒",
+  "shot_type": "中景",
+  "camera_movement": "固定",
+  "visual_description": "详细的画面描述",
+  "narration": "旁白内容，如果没有则为null",
+  "dialogue": {"char_001": "对话内容"},
+  "mood": "情绪氛围",
+  "image_prompt_zh": "用于AI图像生成的中文prompt，包含完整的角色外观描述和场景细节"
 }"""
 
     def __init__(self, llm_service: LLMService, translator: Translator | None = None):
         self.llm = llm_service
         self.translator = translator
 
-    async def generate_outline(
-        self,
-        topic: str,
-        style: str = "写实",
-        on_progress: Callable[[str], None] | None = None,
-    ) -> str:
-        """Stage 1: Generate story outline from topic"""
-        if on_progress:
-            on_progress("正在生成故事大纲...")
-
-        prompt = f"""请根据以下主题创作一个短视频故事大纲：
-
-主题：{topic}
-
-视觉风格：{style}
-
-要求：
-- 故事长度控制在3-8个场景
-- 适合1-2分钟的短视频
-- 有清晰的故事线和情感弧度
-- 角色设定要有识别度"""
-
-        response = await self.llm.generate(
-            prompt=prompt,
-            system_prompt=self.OUTLINE_SYSTEM_PROMPT,
-            temperature=0.8,
-        )
-
-        return response.content
-
     async def extract_elements(
         self,
-        outline: str,
-        style: str = "写实",
+        full_text: str,
         on_progress: Callable[[str], None] | None = None,
     ) -> tuple[list[Character], list[Location]]:
-        """Stage 2: Extract characters and locations from outline"""
+        """Stage 1: Extract all characters and locations from full text"""
         if on_progress:
-            on_progress("正在提取角色和场景...")
+            on_progress("正在分析角色和场景...")
 
-        prompt = f"""请从以下故事大纲中提取所有角色和场景的详细设定：
+        # For very long text, we may need to summarize first
+        text_to_analyze = full_text
+        if len(full_text) > 30000:
+            # Truncate but keep beginning and end for context
+            text_to_analyze = full_text[:15000] + "\n\n...(中间内容省略)...\n\n" + full_text[-10000:]
 
-{outline}
+        prompt = f"""请从以下文本中提取所有角色和场景的详细设定：
 
-视觉风格：{style}
+{text_to_analyze}
 
 请确保：
-1. 每个角色的外观描述完整详细
-2. 每个场景的环境描述具体
-3. 生成适合AI图像生成的prompt"""
+1. 提取所有重要角色，包括主角和配角
+2. 为每个角色生成详细的外观描述
+3. 提取所有出现的场景/地点"""
 
         data = await self.llm.generate_json(
             prompt=prompt,
@@ -230,85 +189,155 @@ class ScriptService:
 
         return characters, locations
 
-    async def generate_scenes(
+    async def generate_split_plan(
         self,
-        outline: str,
+        full_text: str,
         characters: list[Character],
         locations: list[Location],
-        style: str = "写实",
-        aspect_ratio: str = "16:9",
+        target_scenes: int = 8,
         on_progress: Callable[[str], None] | None = None,
-    ) -> tuple[list[Scene], StyleGuide, str, str]:
-        """Stage 3: Generate detailed scenes/storyboard
-
-        Returns: (scenes, style_guide, title, summary)
-        """
+    ) -> list[dict]:
+        """Stage 2: Generate scene splitting plan"""
         if on_progress:
-            on_progress("正在生成分镜脚本...")
+            on_progress("正在规划分镜切割方案...")
 
-        # Build character and location context
-        char_context = "\n".join([
-            f"- {c.id}: {c.name}（{c.role}）- {c.get_description()}"
-            for c in characters
-        ])
+        # Build context
+        char_list = ", ".join([f"{c.name}({c.id})" for c in characters])
+        loc_list = ", ".join([f"{l.name}({l.id})" for l in locations])
 
-        loc_context = "\n".join([
-            f"- {l.id}: {l.name} - {l.description}（{l.time_of_day}，{l.atmosphere}）"
-            for l in locations
-        ])
+        # For long text, provide summary for planning
+        text_for_planning = full_text
+        if len(full_text) > 40000:
+            text_for_planning = full_text[:20000] + "\n\n...(中间内容省略)...\n\n" + full_text[-15000:]
 
-        prompt = f"""请根据以下信息生成详细的分镜脚本：
+        prompt = f"""请为以下文本规划分镜切割方案：
 
-## 故事大纲
-{outline}
+{text_for_planning}
 
-## 已定义的角色
-{char_context}
+已提取的角色：{char_list}
+已提取的场景：{loc_list}
 
-## 已定义的场景
-{loc_context}
-
-## 视觉设定
-- 风格：{style}
-- 画面比例：{aspect_ratio}
-
-请生成完整的分镜脚本，每个分镜的image_prompt_zh要包含完整的角色外观描述。"""
+要求：
+- 将文本切分成约{target_scenes}个场景
+- 每个场景的start_marker和end_marker必须是原文中实际存在的文字
+- 确保场景之间有连贯性"""
 
         data = await self.llm.generate_json(
             prompt=prompt,
-            system_prompt=self.SCENES_SYSTEM_PROMPT,
+            system_prompt=self.SCENE_SPLIT_SYSTEM_PROMPT,
             temperature=0.7,
         )
 
-        scenes = []
-        for scene_data in data.get("scenes", []):
-            scene = Scene(
-                scene_id=scene_data.get("scene_id", len(scenes) + 1),
-                location_id=scene_data.get("location_id", ""),
-                character_ids=scene_data.get("character_ids", []),
-                duration=scene_data.get("duration", "5秒"),
-                shot_type=scene_data.get("shot_type", "中景"),
-                camera_movement=scene_data.get("camera_movement", "固定"),
-                visual_description=scene_data.get("visual_description", ""),
-                narration=scene_data.get("narration"),
-                dialogue=scene_data.get("dialogue"),
-                mood=scene_data.get("mood", ""),
-                image_prompt_zh=scene_data.get("image_prompt_zh", ""),
-            )
-            scenes.append(scene)
+        return data.get("scenes", [])
 
-        style_data = data.get("style_guide", {})
-        style_guide = StyleGuide(
-            visual_style=style_data.get("visual_style", style),
-            color_palette=style_data.get("color_palette", []),
-            aspect_ratio=style_data.get("aspect_ratio", aspect_ratio),
-            target_duration=style_data.get("target_duration", "60秒"),
+    def split_text_by_markers(
+        self,
+        full_text: str,
+        split_plan: list[dict],
+    ) -> list[tuple[dict, str]]:
+        """Split text into segments based on markers
+
+        Returns: List of (scene_plan, text_segment) tuples
+        """
+        segments = []
+
+        for scene in split_plan:
+            start_marker = scene.get("start_marker", "")
+            end_marker = scene.get("end_marker", "")
+
+            # Find start position
+            start_pos = 0
+            if start_marker:
+                pos = full_text.find(start_marker)
+                if pos != -1:
+                    start_pos = pos
+
+            # Find end position
+            end_pos = len(full_text)
+            if end_marker:
+                pos = full_text.find(end_marker, start_pos)
+                if pos != -1:
+                    end_pos = pos + len(end_marker)
+
+            # Extract segment
+            segment = full_text[start_pos:end_pos].strip()
+
+            # If segment is empty, use the summary as fallback
+            if not segment:
+                segment = scene.get("summary", "")
+
+            segments.append((scene, segment))
+
+        return segments
+
+    async def generate_scene_detail(
+        self,
+        scene_plan: dict,
+        text_segment: str,
+        characters: list[Character],
+        locations: list[Location],
+        style: str = "写实",
+        on_progress: Callable[[str], None] | None = None,
+    ) -> Scene:
+        """Stage 3: Generate detailed scene description for one segment"""
+        scene_id = scene_plan.get("scene_id", 1)
+
+        if on_progress:
+            on_progress(f"正在生成第{scene_id}个分镜...")
+
+        # Get relevant characters
+        char_ids = scene_plan.get("character_ids", [])
+        relevant_chars = [c for c in characters if c.id in char_ids]
+        char_context = "\n".join([
+            f"- {c.name}({c.id}): {c.get_description()}"
+            for c in relevant_chars
+        ]) or "无特定角色"
+
+        # Get location
+        loc_id = scene_plan.get("location_id", "")
+        location = next((l for l in locations if l.id == loc_id), None)
+        loc_context = f"{location.name}: {location.description}" if location else "未指定场景"
+
+        prompt = f"""请为以下文本片段生成详细的分镜描述：
+
+## 文本内容
+{text_segment}
+
+## 场景概述
+{scene_plan.get("summary", "")}
+
+## 出场角色
+{char_context}
+
+## 场景环境
+{loc_context}
+
+## 视觉风格
+{style}
+
+请生成这个场景的详细分镜描述，image_prompt_zh必须包含角色的完整外观特征。"""
+
+        data = await self.llm.generate_json(
+            prompt=prompt,
+            system_prompt=self.SCENE_DETAIL_SYSTEM_PROMPT,
+            temperature=0.7,
         )
 
-        title = data.get("title", "")
-        summary = data.get("summary", "")
+        scene = Scene(
+            scene_id=scene_id,
+            location_id=loc_id,
+            character_ids=char_ids,
+            duration=data.get("duration", "5秒"),
+            shot_type=data.get("shot_type", "中景"),
+            camera_movement=data.get("camera_movement", "固定"),
+            visual_description=data.get("visual_description", ""),
+            narration=data.get("narration"),
+            dialogue=data.get("dialogue"),
+            mood=data.get("mood", ""),
+            image_prompt_zh=data.get("image_prompt_zh", ""),
+        )
 
-        return scenes, style_guide, title, summary
+        return scene
 
     async def translate_prompts(
         self,
@@ -361,46 +390,70 @@ class ScriptService:
         skip_outline: bool = False,
         style: str = "写实",
         aspect_ratio: str = "16:9",
+        target_scenes: int = 8,
         on_progress: Callable[[str], None] | None = None,
     ) -> Script:
-        """Complete script generation workflow
+        """Complete script generation workflow for long text
+
+        New workflow:
+        1. Extract all characters and locations from full text
+        2. Generate scene splitting plan
+        3. Split text by markers using code
+        4. Generate detailed scene for each segment
+        5. Translate prompts
 
         Args:
-            input_text: Topic or detailed description
-            skip_outline: If True, treat input_text as outline and skip stage 1
+            input_text: Full text content (e.g., novel chapter)
+            skip_outline: Deprecated, kept for compatibility
             style: Visual style
             aspect_ratio: Aspect ratio
+            target_scenes: Target number of scenes
             on_progress: Progress callback
 
         Returns:
             Complete Script object
         """
-        # Stage 1: Generate outline (or use input directly)
-        if skip_outline:
-            outline = input_text
-        else:
-            outline = await self.generate_outline(input_text, style, on_progress)
+        # Stage 1: Extract characters and locations
+        characters, locations = await self.extract_elements(input_text, on_progress)
 
-        # Stage 2: Extract characters and locations
-        characters, locations = await self.extract_elements(outline, style, on_progress)
+        # Stage 2: Generate split plan
+        split_plan = await self.generate_split_plan(
+            input_text, characters, locations, target_scenes, on_progress
+        )
 
-        # Stage 3: Generate scenes
-        scenes, style_guide, title, summary = await self.generate_scenes(
-            outline, characters, locations, style, aspect_ratio, on_progress
+        # Stage 3: Split text by markers (code, no LLM)
+        if on_progress:
+            on_progress("正在切割文本...")
+        segments = self.split_text_by_markers(input_text, split_plan)
+
+        # Stage 4: Generate detailed scenes one by one
+        scenes = []
+        for scene_plan, text_segment in segments:
+            scene = await self.generate_scene_detail(
+                scene_plan, text_segment, characters, locations, style, on_progress
+            )
+            scenes.append(scene)
+
+        # Create style guide
+        style_guide = StyleGuide(
+            visual_style=style,
+            color_palette=[],
+            aspect_ratio=aspect_ratio,
+            target_duration=f"{len(scenes) * 5}秒",
         )
 
         # Create script
         script = Script(
-            title=title,
-            summary=summary,
+            title="",  # Will be set by user or derived
+            summary="",
             characters=characters,
             locations=locations,
             scenes=scenes,
             style_guide=style_guide,
-            outline=outline,
+            outline=input_text[:500] + "..." if len(input_text) > 500 else input_text,
         )
 
-        # Translate prompts
+        # Stage 5: Translate prompts
         script = await self.translate_prompts(script, on_progress)
 
         if on_progress:

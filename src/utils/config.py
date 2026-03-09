@@ -93,6 +93,27 @@ class Config:
         """Get DeepSeek model"""
         return self.get("llm.providers.deepseek.model", "deepseek-chat")
 
+    @property
+    def jimeng_access_key(self) -> str:
+        """Get Jimeng (Volcengine) Access Key"""
+        env_key = self.get_env("JIMENG_ACCESS_KEY") or self.get_env("VOLC_ACCESSKEY")
+        if env_key:
+            return env_key
+        return self.get("image.providers.jimeng.access_key", "")
+
+    @property
+    def jimeng_secret_key(self) -> str:
+        """Get Jimeng (Volcengine) Secret Key"""
+        env_key = self.get_env("JIMENG_SECRET_KEY") or self.get_env("VOLC_SECRETKEY")
+        if env_key:
+            return env_key
+        return self.get("image.providers.jimeng.secret_key", "")
+
+    @property
+    def jimeng_model(self) -> str:
+        """Get Jimeng model"""
+        return self.get("image.providers.jimeng.model", "jimeng_t2i_v40")
+
     def reload(self) -> None:
         """Reload configuration"""
         self._load()

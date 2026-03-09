@@ -4,6 +4,9 @@ dearpygui>=1.9.0
 # HTTP客户端
 httpx>=0.25.0
 
+# 火山引擎SDK (即梦图片生成)
+volcengine>=1.0.0
+
 # 配置管理
 python-dotenv>=1.0.0
 pyyaml>=6.0

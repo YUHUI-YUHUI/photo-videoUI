@@ -6,11 +6,12 @@ from pathlib import Path
 
 import dearpygui.dearpygui as dpg
 
-from ..adapters import DeepSeekAdapter
-from ..services import LLMService, ScriptService, ProjectService, Translator
+from ..adapters import DeepSeekAdapter, JimengAdapter
+from ..services import LLMService, ScriptService, ProjectService, Translator, ImageService
 from ..models import Script
 from ..utils.config import Config
 from ..utils.i18n import I18n
+from .fdialog import FileDialog
 
 
 class PAVUIApp:
@@ -24,7 +25,7 @@ class PAVUIApp:
         self.i18n = I18n()
         self.i18n.set_language("zh")
 
-        # Initialize services
+        # Initialize LLM services
         self.adapter = DeepSeekAdapter(
             api_key=self.config.deepseek_api_key,
             base_url=self.config.deepseek_base_url,
@@ -35,10 +36,20 @@ class PAVUIApp:
         self.script_service = ScriptService(self.llm_service, self.translator)
         self.project_service = ProjectService()
 
+        # Initialize Image services
+        self.jimeng_adapter = JimengAdapter(
+            access_key=self.config.jimeng_access_key,
+            secret_key=self.config.jimeng_secret_key,
+            model=self.config.jimeng_model,
+        )
+        self.image_service = ImageService(self.jimeng_adapter)
+
         # State
         self.current_script: Script | None = None
         self.is_generating = False
+        self.is_generating_images = False
         self.loaded_file_content: str | None = None
+        self.generated_images: dict = {"characters": [], "locations": [], "scenes": []}
 
     def run(self):
         """Run the application"""
@@ -107,14 +118,9 @@ class PAVUIApp:
             with dpg.tab(label="脚本生成"):
                 self._create_script_tab()
 
-            # Images Tab (placeholder)
+            # Images Tab
             with dpg.tab(label="图片生成"):
-                dpg.add_text("即将在第二阶段推出", color=(150, 150, 150))
-                dpg.add_spacer(height=10)
-                dpg.add_text("功能预览:")
-                dpg.add_text("  - 即梦API集成")
-                dpg.add_text("  - 角色参考图生成")
-                dpg.add_text("  - 场景图片生成")
+                self._create_image_tab()
 
             # Video Tab (placeholder)
             with dpg.tab(label="视频合成"):
@@ -229,7 +235,15 @@ class PAVUIApp:
                     )
 
                 dpg.add_spacer(height=5)
-                dpg.add_checkbox(tag="skip_outline", label="跳过大纲，直接生成分镜")
+                with dpg.group(horizontal=True):
+                    dpg.add_text("目标场景数:")
+                    dpg.add_slider_int(
+                        tag="target_scenes",
+                        default_value=8,
+                        min_value=3,
+                        max_value=20,
+                        width=150,
+                    )
 
                 dpg.add_spacer(height=15)
                 dpg.add_button(
@@ -275,6 +289,99 @@ class PAVUIApp:
                                 color=(150, 150, 150),
                             )
 
+    def _create_image_tab(self):
+        """Create image generation tab"""
+        with dpg.group(horizontal=True):
+            # Left panel - Controls
+            with dpg.child_window(width=350, height=-1):
+                dpg.add_text("图片生成设置", color=(100, 180, 255))
+                dpg.add_separator()
+                dpg.add_spacer(height=10)
+
+                # Script status
+                dpg.add_text("当前脚本状态:", color=(150, 150, 150))
+                dpg.add_text(tag="img_script_status", default_value="未加载脚本", color=(255, 200, 100))
+
+                dpg.add_spacer(height=10)
+
+                # Generation options
+                dpg.add_text("生成选项:")
+                dpg.add_checkbox(tag="gen_characters", label="生成角色参考图", default_value=True)
+                dpg.add_checkbox(tag="gen_locations", label="生成场景参考图", default_value=True)
+                dpg.add_checkbox(tag="gen_scenes", label="生成分镜图片", default_value=True)
+
+                dpg.add_spacer(height=10)
+
+                # Aspect ratio for scenes
+                with dpg.group(horizontal=True):
+                    dpg.add_text("分镜比例:")
+                    dpg.add_combo(
+                        tag="img_aspect_ratio",
+                        items=["16:9", "9:16", "1:1", "4:3"],
+                        default_value="16:9",
+                        width=80,
+                    )
+
+                dpg.add_spacer(height=15)
+
+                # Generate button
+                dpg.add_button(
+                    tag="generate_images_btn",
+                    label="开始生成图片",
+                    width=-1,
+                    height=40,
+                    callback=self._on_generate_images_click,
+                )
+
+                dpg.add_spacer(height=10)
+                dpg.add_text(tag="img_progress_text", default_value="", color=(255, 200, 100))
+
+                dpg.add_spacer(height=20)
+                dpg.add_separator()
+                dpg.add_spacer(height=10)
+
+                # API Status
+                dpg.add_text("即梦API状态:", color=(150, 150, 150))
+                with dpg.group(horizontal=True):
+                    dpg.add_text(tag="jimeng_status", default_value="未配置", color=(255, 100, 100))
+                    dpg.add_button(label="测试", callback=self._on_test_jimeng, width=50)
+
+            dpg.add_spacer(width=10)
+
+            # Right panel - Generated images preview
+            with dpg.child_window(width=-1, height=-1):
+                dpg.add_text("生成的图片", color=(100, 180, 255))
+                dpg.add_separator()
+                dpg.add_spacer(height=10)
+
+                with dpg.tab_bar():
+                    # Character images
+                    with dpg.tab(label="角色图"):
+                        with dpg.child_window(tag="char_images_panel", height=-1):
+                            dpg.add_text(
+                                "暂无角色图片",
+                                tag="no_char_images",
+                                color=(150, 150, 150),
+                            )
+
+                    # Location images
+                    with dpg.tab(label="场景图"):
+                        with dpg.child_window(tag="loc_images_panel", height=-1):
+                            dpg.add_text(
+                                "暂无场景图片",
+                                tag="no_loc_images",
+                                color=(150, 150, 150),
+                            )
+
+                    # Scene images
+                    with dpg.tab(label="分镜图"):
+                        with dpg.child_window(tag="scene_images_panel", height=-1):
+                            dpg.add_text(
+                                "暂无分镜图片",
+                                tag="no_scene_images",
+                                color=(150, 150, 150),
+                            )
+
     def _create_settings_tab(self):
         """Create settings tab"""
         dpg.add_text("API配置", color=(100, 180, 255))
@@ -302,6 +409,37 @@ class PAVUIApp:
                 width=300,
                 default_value=self.config.deepseek_base_url,
             )
+
+        dpg.add_spacer(height=20)
+        dpg.add_separator()
+        dpg.add_spacer(height=10)
+
+        # Jimeng settings
+        dpg.add_text("即梦AI (图片生成)", color=(100, 180, 255))
+        dpg.add_text("从火山引擎获取密钥: console.volcengine.com", color=(150, 150, 150))
+        dpg.add_spacer(height=5)
+
+        with dpg.group(horizontal=True):
+            dpg.add_text("Access Key:")
+            dpg.add_input_text(
+                tag="jimeng_ak_input",
+                password=True,
+                width=300,
+                hint="输入Access Key",
+                default_value=self.config.jimeng_access_key or "",
+            )
+
+        with dpg.group(horizontal=True):
+            dpg.add_text("Secret Key:")
+            dpg.add_input_text(
+                tag="jimeng_sk_input",
+                password=True,
+                width=300,
+                hint="输入Secret Key",
+                default_value=self.config.jimeng_secret_key or "",
+            )
+            dpg.add_button(label="保存并测试", callback=self._on_save_jimeng)
+            dpg.add_text(tag="jimeng_test_result", default_value="")
 
         dpg.add_spacer(height=20)
         dpg.add_separator()
@@ -376,29 +514,29 @@ class PAVUIApp:
             self.loaded_file_content = None
 
     def _on_select_file(self, sender, app_data):
-        """Open file dialog using tkinter (more user-friendly)"""
-        import tkinter as tk
-        from tkinter import filedialog
+        """Open file dialog"""
+        if not hasattr(self, 'file_dialog') or self.file_dialog is None:
+            self.file_dialog = FileDialog(
+                title="选择文件",
+                callback=self._on_file_dialog_callback,
+                show_dir_size=False,
+                modal=False,
+                allow_drag=False,
+                multi_selection=False,
+                default_path=str(Path.home()),
+                filter_list=[".txt", ".md", ".*"],
+                show_shortcuts_menu=True,
+                width=900,
+                height=550,
+            )
+        self.file_dialog.show_file_dialog()
 
-        # Create hidden tkinter root
-        root = tk.Tk()
-        root.withdraw()
-        root.attributes('-topmost', True)
-
-        # Open native file dialog
-        file_path = filedialog.askopenfilename(
-            title="Select a text file",
-            filetypes=[
-                ("Text files", "*.txt"),
-                ("Markdown files", "*.md"),
-                ("All files", "*.*"),
-            ],
-        )
-
-        root.destroy()
-
-        if file_path:
-            self._load_file(file_path)
+    def _on_file_dialog_callback(self, selected_files):
+        """Handle file dialog selection"""
+        if selected_files and len(selected_files) > 0:
+            file_path = selected_files[0]
+            if Path(file_path).is_file():
+                self._load_file(file_path)
 
 
     def _on_generate_click(self, sender, app_data):
@@ -435,33 +573,16 @@ class PAVUIApp:
         thread.daemon = True
         thread.start()
 
-    def _generate_script_thread(self, topic: str):
+    def _generate_script_thread(self, input_text: str):
         """Generate script in background thread"""
         try:
             style = dpg.get_value("style_select")
             aspect_ratio = dpg.get_value("aspect_ratio")
-            skip_outline = dpg.get_value("skip_outline")
-
-            # Map English style to Chinese for the API
-            style_map = {
-                "Realistic": "写实",
-                "Anime": "动漫",
-                "3D Render": "3D渲染",
-                "Illustration": "插画",
-                "Watercolor": "水彩",
-            }
-            style_zh = style_map.get(style, "写实")
+            target_scenes = dpg.get_value("target_scenes")
 
             def on_progress(msg):
-                # Map Chinese progress messages to English
-                msg_map = {
-                    "正在生成故事大纲...": "Generating story outline...",
-                    "正在提取角色和场景...": "Extracting characters and locations...",
-                    "正在生成分镜脚本...": "Generating storyboard...",
-                    "正在翻译Prompt...": "Translating prompts...",
-                    "脚本生成完成！": "Script generation complete!",
-                }
-                dpg.set_value("progress_text", msg_map.get(msg, msg))
+                # Display progress directly (already in Chinese)
+                dpg.set_value("progress_text", msg)
 
             # Run async generation
             loop = asyncio.new_event_loop()
@@ -469,10 +590,10 @@ class PAVUIApp:
 
             script = loop.run_until_complete(
                 self.script_service.generate_full_script(
-                    input_text=topic,
-                    skip_outline=skip_outline,
-                    style=style_zh,
+                    input_text=input_text,
+                    style=style,
                     aspect_ratio=aspect_ratio,
+                    target_scenes=target_scenes,
                     on_progress=on_progress,
                 )
             )
@@ -480,7 +601,17 @@ class PAVUIApp:
 
             self.current_script = script
             self._update_script_display()
-            dpg.set_value("progress_text", "Script generation complete!")
+            dpg.set_value("progress_text", "脚本生成完成！")
+
+            # Update image tab status
+            char_count = len(script.characters)
+            loc_count = len(script.locations)
+            scene_count = len(script.scenes)
+            dpg.set_value(
+                "img_script_status",
+                f"已加载: {char_count}个角色, {loc_count}个场景, {scene_count}个分镜"
+            )
+            dpg.configure_item("img_script_status", color=(100, 255, 100))
 
         except Exception as e:
             dpg.set_value("progress_text", f"Error: {str(e)[:50]}")
@@ -558,6 +689,148 @@ class PAVUIApp:
                     dpg.add_separator()
         else:
             dpg.add_text("No scenes", parent="scenes_panel", color=(150, 150, 150))
+
+    def _on_generate_images_click(self, sender, app_data):
+        """Handle generate images button click"""
+        if self.is_generating_images:
+            return
+
+        if not self.current_script:
+            dpg.set_value("img_progress_text", "请先生成脚本")
+            return
+
+        if not self.jimeng_adapter.access_key or not self.jimeng_adapter.secret_key:
+            dpg.set_value("img_progress_text", "请先在设置中配置即梦API密钥")
+            return
+
+        # Get options
+        gen_characters = dpg.get_value("gen_characters")
+        gen_locations = dpg.get_value("gen_locations")
+        gen_scenes = dpg.get_value("gen_scenes")
+        aspect_ratio = dpg.get_value("img_aspect_ratio")
+
+        if not any([gen_characters, gen_locations, gen_scenes]):
+            dpg.set_value("img_progress_text", "请至少选择一种图片类型")
+            return
+
+        self.is_generating_images = True
+        dpg.configure_item("generate_images_btn", enabled=False)
+        dpg.set_value("img_progress_text", "开始生成图片...")
+
+        thread = threading.Thread(
+            target=self._generate_images_thread,
+            args=(gen_characters, gen_locations, gen_scenes, aspect_ratio),
+        )
+        thread.daemon = True
+        thread.start()
+
+    def _generate_images_thread(
+        self,
+        gen_characters: bool,
+        gen_locations: bool,
+        gen_scenes: bool,
+        aspect_ratio: str,
+    ):
+        """Generate images in background thread"""
+        try:
+            style = self.current_script.style_guide.visual_style if self.current_script.style_guide else "写实"
+
+            def on_progress(msg):
+                dpg.set_value("img_progress_text", msg)
+
+            # Run async generation
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+            results = loop.run_until_complete(
+                self.image_service.generate_all_images(
+                    script=self.current_script,
+                    style=style,
+                    aspect_ratio=aspect_ratio,
+                    generate_characters=gen_characters,
+                    generate_locations=gen_locations,
+                    generate_scenes=gen_scenes,
+                    on_progress=on_progress,
+                )
+            )
+            loop.close()
+
+            self.generated_images = results
+            self._update_images_display()
+            dpg.set_value("img_progress_text", "图片生成完成！")
+
+        except Exception as e:
+            dpg.set_value("img_progress_text", f"错误: {str(e)[:50]}")
+
+        finally:
+            self.is_generating_images = False
+            dpg.configure_item("generate_images_btn", enabled=True)
+
+    def _update_images_display(self):
+        """Update the image display panels"""
+        # Update character images
+        dpg.delete_item("char_images_panel", children_only=True)
+        if self.generated_images.get("characters"):
+            for img in self.generated_images["characters"]:
+                with dpg.group(parent="char_images_panel"):
+                    dpg.add_text(f"角色: {img.reference_id}", color=(100, 200, 150))
+                    dpg.add_text(f"URL: {img.url[:50]}...", color=(150, 150, 150))
+                    dpg.add_separator()
+        else:
+            dpg.add_text("暂无角色图片", parent="char_images_panel", color=(150, 150, 150))
+
+        # Update location images
+        dpg.delete_item("loc_images_panel", children_only=True)
+        if self.generated_images.get("locations"):
+            for img in self.generated_images["locations"]:
+                with dpg.group(parent="loc_images_panel"):
+                    dpg.add_text(f"场景: {img.reference_id}", color=(100, 200, 150))
+                    dpg.add_text(f"URL: {img.url[:50]}...", color=(150, 150, 150))
+                    dpg.add_separator()
+        else:
+            dpg.add_text("暂无场景图片", parent="loc_images_panel", color=(150, 150, 150))
+
+        # Update scene images
+        dpg.delete_item("scene_images_panel", children_only=True)
+        if self.generated_images.get("scenes"):
+            for img in self.generated_images["scenes"]:
+                with dpg.group(parent="scene_images_panel"):
+                    dpg.add_text(f"分镜: {img.reference_id}", color=(100, 200, 150))
+                    dpg.add_text(f"URL: {img.url[:50]}...", color=(150, 150, 150))
+                    dpg.add_separator()
+        else:
+            dpg.add_text("暂无分镜图片", parent="scene_images_panel", color=(150, 150, 150))
+
+    def _on_test_jimeng(self, sender, app_data):
+        """Test Jimeng API connection"""
+        if self.jimeng_adapter.access_key and self.jimeng_adapter.secret_key:
+            dpg.set_value("jimeng_status", "已配置")
+            dpg.configure_item("jimeng_status", color=(100, 255, 100))
+        else:
+            dpg.set_value("jimeng_status", "未配置")
+            dpg.configure_item("jimeng_status", color=(255, 100, 100))
+
+    def _on_save_jimeng(self, sender, app_data):
+        """Save and test Jimeng API credentials"""
+        ak = dpg.get_value("jimeng_ak_input")
+        sk = dpg.get_value("jimeng_sk_input")
+
+        if not ak or not sk:
+            dpg.set_value("jimeng_test_result", "请输入完整密钥")
+            return
+
+        # Update adapter
+        self.jimeng_adapter = JimengAdapter(
+            access_key=ak,
+            secret_key=sk,
+            model=self.config.jimeng_model,
+        )
+        self.image_service = ImageService(self.jimeng_adapter)
+
+        # Update status
+        dpg.set_value("jimeng_status", "已配置")
+        dpg.configure_item("jimeng_status", color=(100, 255, 100))
+        dpg.set_value("jimeng_test_result", "已保存")
 
     def _on_test_connection(self, sender, app_data):
         """Test API connection"""
