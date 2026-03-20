@@ -40,11 +40,12 @@ class JimengAdapter:
         "jimeng_i2i_v40": "即梦4.0 图生图",
     }
 
-    # Aspect ratios
+    # Aspect ratios - must use dimensions supported by Jimeng 4.0 API
+    # Supported: 1024x1024, 1024x576, 576x1024, 1024x768, 768x1024, 1024x682, 682x1024
     ASPECT_RATIOS = {
         "1:1": (1024, 1024),
-        "16:9": (1280, 720),
-        "9:16": (720, 1280),
+        "16:9": (1024, 576),
+        "9:16": (576, 1024),
         "4:3": (1024, 768),
         "3:4": (768, 1024),
     }
@@ -103,18 +104,18 @@ class JimengAdapter:
 
         # Get dimensions from aspect ratio
         width, height = self.ASPECT_RATIOS.get(aspect_ratio, (1024, 1024))
+        print(f"[DEBUG] Jimeng API: aspect_ratio={aspect_ratio}, width={width}, height={height}")
 
         # Determine model based on whether we have a reference image
         req_key = "jimeng_i2i_v40" if reference_image_url else self.model
 
-        # Build request body
+        # Build request body - matching official docs format
         body = {
             "req_key": req_key,
             "prompt": prompt,
             "width": width,
             "height": height,
-            "use_sr": True,  # Enable super resolution
-            "return_url": True,
+            "return_url": True,  # Return URL instead of base64
         }
 
         if negative_prompt:
@@ -122,10 +123,12 @@ class JimengAdapter:
 
         if reference_image_url:
             body["image_urls"] = [reference_image_url]
-            body["scale"] = 0.5  # Control how much to follow reference
+            body["scale"] = 0.5
 
         if seed is not None:
             body["seed"] = seed
+
+        print(f"[DEBUG] Jimeng API submit body: {body}")
 
         # Submit task
         task_id = await self._submit_task(body)
@@ -133,8 +136,8 @@ class JimengAdapter:
         if on_progress:
             on_progress("等待图片生成...")
 
-        # Poll for result
-        result = await self._poll_result(task_id, on_progress)
+        # Poll for result (pass req_key for query)
+        result = await self._poll_result(task_id, req_key, on_progress)
 
         return result
 
@@ -156,7 +159,7 @@ class JimengAdapter:
 
     def _sync_submit_task(self, body: dict) -> dict:
         """Synchronous task submission using SDK"""
-        return self.service.cv_sync2_async_submit_task(body)
+        return self.service.cv_sync2async_submit_task(body)
 
     async def _http_submit_task(self, body: dict) -> dict:
         """Submit task via HTTP (fallback)"""
@@ -169,6 +172,7 @@ class JimengAdapter:
     async def _poll_result(
         self,
         task_id: str,
+        req_key: str,
         on_progress: Callable[[str], None] | None = None,
         max_wait: int = 120,
         poll_interval: int = 2,
@@ -179,23 +183,43 @@ class JimengAdapter:
         while time.time() - start_time < max_wait:
             if self.service:
                 response = await asyncio.to_thread(
-                    self._sync_get_result, task_id
+                    self._sync_get_result, task_id, req_key
                 )
             else:
                 raise NotImplementedError("SDK required")
 
-            status = response.get("data", {}).get("status", "")
+            # Log full response for debugging
+            print(f"[DEBUG] Poll response code: {response.get('code')}, message: {response.get('message', '')}")
+
+            data = response.get("data", {})
+            if not data:
+                print(f"[DEBUG] No data in response: {response}")
+                await asyncio.sleep(poll_interval)
+                continue
+
+            status = data.get("status", "")
+            print(f"[DEBUG] Status: {status}, data keys: {list(data.keys())}")
 
             if status == "done":
-                # Task completed
-                data = response["data"]
+                # Task completed - according to docs, image_urls is a string array
                 image_urls = data.get("image_urls", [])
+                print(f"[DEBUG] image_urls: {image_urls}")
 
                 if not image_urls:
-                    raise Exception("No image generated")
+                    # Maybe the field name is different, print all data
+                    print(f"[DEBUG] Full data: {data}")
+                    raise Exception(f"No image_urls in response. Data keys: {list(data.keys())}")
+
+                # image_urls should be a list of URL strings
+                image_url = image_urls[0] if image_urls else ""
+
+                if not image_url:
+                    raise Exception(f"Empty image URL")
+
+                print(f"[DEBUG] Success! Image URL: {image_url[:80]}...")
 
                 return ImageResult(
-                    image_url=image_urls[0],
+                    image_url=image_url,
                     width=data.get("width", 1024),
                     height=data.get("height", 1024),
                     seed=data.get("seed"),
@@ -216,9 +240,12 @@ class JimengAdapter:
 
         raise TimeoutError(f"Image generation timed out after {max_wait}s")
 
-    def _sync_get_result(self, task_id: str) -> dict:
+    def _sync_get_result(self, task_id: str, req_key: str = "jimeng_t2i_v40") -> dict:
         """Synchronous result retrieval using SDK"""
-        return self.service.cv_sync2_async_get_result({"task_id": task_id})
+        return self.service.cv_sync2async_get_result({
+            "req_key": req_key,
+            "task_id": task_id,
+        })
 
     async def test_connection(self) -> bool:
         """Test if the adapter is properly configured"""

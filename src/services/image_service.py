@@ -171,6 +171,7 @@ class ImageService:
         generate_characters: bool = True,
         generate_locations: bool = True,
         generate_scenes: bool = True,
+        save_dir: Path | None = None,
         on_progress: Callable[[str], None] | None = None,
     ) -> dict[str, list[GeneratedImage]]:
         """Generate all images for a script
@@ -182,6 +183,7 @@ class ImageService:
             generate_characters: Whether to generate character references
             generate_locations: Whether to generate location references
             generate_scenes: Whether to generate scene images
+            save_dir: Directory to save images (if None, images are not saved locally)
             on_progress: Progress callback
 
         Returns:
@@ -193,43 +195,75 @@ class ImageService:
             "scenes": [],
         }
 
+        # Create save directories if specified
+        if save_dir:
+            save_dir = Path(save_dir)
+            (save_dir / "characters").mkdir(parents=True, exist_ok=True)
+            (save_dir / "locations").mkdir(parents=True, exist_ok=True)
+            (save_dir / "scenes").mkdir(parents=True, exist_ok=True)
+
         character_refs = {}
+
+        # Debug: print script contents
+        print(f"[DEBUG] Script has {len(script.characters)} characters, {len(script.locations)} locations, {len(script.scenes)} scenes")
 
         # Generate character reference images
         if generate_characters:
             if on_progress:
-                on_progress("开始生成角色参考图...")
+                on_progress(f"开始生成角色参考图... (共{len(script.characters)}个)")
 
             for char in script.characters:
+                print(f"[DEBUG] Generating image for character: {char.name}")
                 try:
                     image = await self.generate_character_reference(
                         char, style, "3:4", on_progress
                     )
+                    # Save to local if save_dir specified
+                    if save_dir and image.url:
+                        local_path = save_dir / "characters" / f"{char.id}.png"
+                        await self.download_image(image.url, local_path)
+                        image.local_path = local_path
+                        if on_progress:
+                            on_progress(f"已保存: {local_path.name}")
                     results["characters"].append(image)
                     character_refs[char.id] = image.url
                 except Exception as e:
+                    print(f"[ERROR] Character {char.name} generation failed: {e}")
+                    import traceback
+                    traceback.print_exc()
                     if on_progress:
                         on_progress(f"角色 {char.name} 生成失败: {str(e)[:30]}")
 
         # Generate location reference images
         if generate_locations:
             if on_progress:
-                on_progress("开始生成场景参考图...")
+                on_progress(f"开始生成场景参考图... (共{len(script.locations)}个)")
 
             for loc in script.locations:
+                print(f"[DEBUG] Generating image for location: {loc.name}")
                 try:
                     image = await self.generate_location_reference(
                         loc, style, aspect_ratio, on_progress
                     )
+                    # Save to local if save_dir specified
+                    if save_dir and image.url:
+                        local_path = save_dir / "locations" / f"{loc.id}.png"
+                        await self.download_image(image.url, local_path)
+                        image.local_path = local_path
+                        if on_progress:
+                            on_progress(f"已保存: {local_path.name}")
                     results["locations"].append(image)
                 except Exception as e:
+                    print(f"[ERROR] Location {loc.name} generation failed: {e}")
+                    import traceback
+                    traceback.print_exc()
                     if on_progress:
                         on_progress(f"场景 {loc.name} 生成失败: {str(e)[:30]}")
 
         # Generate scene images
         if generate_scenes:
             if on_progress:
-                on_progress("开始生成分镜图...")
+                on_progress(f"开始生成分镜图... (共{len(script.scenes)}个)")
 
             for scene in script.scenes:
                 try:
@@ -242,8 +276,18 @@ class ImageService:
                         character_refs,
                         on_progress,
                     )
+                    # Save to local if save_dir specified
+                    if save_dir and image.url:
+                        local_path = save_dir / "scenes" / f"scene_{scene.scene_id:03d}.png"
+                        await self.download_image(image.url, local_path)
+                        image.local_path = local_path
+                        if on_progress:
+                            on_progress(f"已保存: {local_path.name}")
                     results["scenes"].append(image)
                 except Exception as e:
+                    print(f"[ERROR] Scene {scene.scene_id} generation failed: {e}")
+                    import traceback
+                    traceback.print_exc()
                     if on_progress:
                         on_progress(f"分镜 {scene.scene_id} 生成失败: {str(e)[:30]}")
 

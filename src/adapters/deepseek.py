@@ -108,13 +108,27 @@ class DeepSeekAdapter(BaseLLMAdapter):
             content = json_match.group(1).strip()
 
         try:
-            return json.loads(content)
+            result = json.loads(content)
+            # If result is a list with a single dict, extract it
+            if isinstance(result, list) and len(result) == 1 and isinstance(result[0], dict):
+                return result[0]
+            return result
         except json.JSONDecodeError as e:
             # Try to find JSON object in content
             json_match = re.search(r"(\{[\s\S]*\})", content)
             if json_match:
                 try:
                     return json.loads(json_match.group(1))
+                except json.JSONDecodeError:
+                    pass
+            # Try to find JSON array in content
+            json_match = re.search(r"(\[[\s\S]*\])", content)
+            if json_match:
+                try:
+                    result = json.loads(json_match.group(1))
+                    if isinstance(result, list) and len(result) == 1 and isinstance(result[0], dict):
+                        return result[0]
+                    return result
                 except json.JSONDecodeError:
                     pass
             raise ValueError(f"Failed to parse JSON response: {e}\nContent: {content[:500]}")

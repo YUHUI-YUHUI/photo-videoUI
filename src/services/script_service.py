@@ -153,6 +153,14 @@ class ScriptService:
             temperature=0.7,
         )
 
+        # Ensure data is a dict (LLM might return a list)
+        if isinstance(data, list):
+            # Try to find the dict in the list or wrap it
+            if len(data) > 0 and isinstance(data[0], dict):
+                data = data[0]
+            else:
+                data = {"characters": [], "locations": []}
+
         characters = []
         for char_data in data.get("characters", []):
             appearance_data = char_data.get("appearance", {})
@@ -227,6 +235,17 @@ class ScriptService:
             system_prompt=self.SCENE_SPLIT_SYSTEM_PROMPT,
             temperature=0.7,
         )
+
+        # Ensure data is a dict
+        if isinstance(data, list):
+            # If it's a list of scenes directly, return it
+            if len(data) > 0 and isinstance(data[0], dict) and "scene_id" in data[0]:
+                return data
+            # Otherwise try to extract from first element
+            if len(data) > 0 and isinstance(data[0], dict):
+                data = data[0]
+            else:
+                return []
 
         return data.get("scenes", [])
 
@@ -322,6 +341,13 @@ class ScriptService:
             system_prompt=self.SCENE_DETAIL_SYSTEM_PROMPT,
             temperature=0.7,
         )
+
+        # Ensure data is a dict
+        if isinstance(data, list):
+            if len(data) > 0 and isinstance(data[0], dict):
+                data = data[0]
+            else:
+                data = {}
 
         scene = Scene(
             scene_id=scene_id,

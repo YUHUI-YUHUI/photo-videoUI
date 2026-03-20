@@ -2,9 +2,12 @@
 
 import asyncio
 import threading
+import tempfile
+import io
 from pathlib import Path
 
 import dearpygui.dearpygui as dpg
+import httpx
 
 from ..adapters import DeepSeekAdapter, JimengAdapter
 from ..services import LLMService, ScriptService, ProjectService, Translator, ImageService
@@ -50,6 +53,7 @@ class PAVUIApp:
         self.is_generating_images = False
         self.loaded_file_content: str | None = None
         self.generated_images: dict = {"characters": [], "locations": [], "scenes": []}
+        self._pending_image_update = False
 
     def run(self):
         """Run the application"""
@@ -71,7 +75,18 @@ class PAVUIApp:
         dpg.setup_dearpygui()
         dpg.show_viewport()
         dpg.set_primary_window("main_window", True)
-        dpg.start_dearpygui()
+
+        # Custom render loop to handle pending updates
+        while dpg.is_dearpygui_running():
+            # Check for pending image updates (from background thread)
+            if self._pending_image_update:
+                self._pending_image_update = False
+                print("[DEBUG] Processing pending image update on main thread...")
+                self._update_images_display()
+                dpg.set_value("img_progress_text", "图片生成完成！")
+
+            dpg.render_dearpygui_frame()
+
         dpg.destroy_context()
 
     def _setup_chinese_font(self):
@@ -715,6 +730,10 @@ class PAVUIApp:
 
         self.is_generating_images = True
         dpg.configure_item("generate_images_btn", enabled=False)
+
+        # Debug: check script contents
+        print(f"[DEBUG] current_script has: {len(self.current_script.characters)} characters, {len(self.current_script.locations)} locations, {len(self.current_script.scenes)} scenes")
+
         dpg.set_value("img_progress_text", "开始生成图片...")
 
         thread = threading.Thread(
@@ -756,8 +775,14 @@ class PAVUIApp:
             loop.close()
 
             self.generated_images = results
-            self._update_images_display()
-            dpg.set_value("img_progress_text", "图片生成完成！")
+            print(f"[DEBUG] Image generation complete: {len(results.get('characters', []))} characters, {len(results.get('locations', []))} locations, {len(results.get('scenes', []))} scenes")
+            for img_type, imgs in results.items():
+                for img in imgs:
+                    print(f"[DEBUG] {img_type}: {img.reference_id} -> {img.url[:60]}...")
+
+            # Schedule UI update on main thread
+            self._pending_image_update = True
+            dpg.set_value("img_progress_text", "图片生成完成，正在加载显示...")
 
         except Exception as e:
             dpg.set_value("img_progress_text", f"错误: {str(e)[:50]}")
@@ -766,15 +791,95 @@ class PAVUIApp:
             self.is_generating_images = False
             dpg.configure_item("generate_images_btn", enabled=True)
 
+    def _load_image_from_url(self, url: str, max_width: int = 300) -> int | None:
+        """Download image from URL and create DearPyGui texture
+
+        Returns texture_id or None if failed
+        """
+        try:
+            from PIL import Image
+
+            print(f"[DEBUG] Downloading image from: {url[:80]}...")
+
+            # Download image
+            response = httpx.get(url, timeout=30.0)
+            response.raise_for_status()
+            print(f"[DEBUG] Downloaded {len(response.content)} bytes")
+
+            # Load with PIL
+            img = Image.open(io.BytesIO(response.content))
+            print(f"[DEBUG] Image loaded: {img.size}, mode={img.mode}")
+
+            # Convert to RGBA
+            if img.mode != "RGBA":
+                img = img.convert("RGBA")
+
+            # Resize to fit display
+            width, height = img.size
+            if width > max_width:
+                ratio = max_width / width
+                new_size = (int(width * ratio), int(height * ratio))
+                img = img.resize(new_size, Image.Resampling.LANCZOS)
+
+            width, height = img.size
+            print(f"[DEBUG] Resized to: {width}x{height}")
+
+            # Convert to flat list of floats (0-1 range)
+            pixels = list(img.getdata())
+            flat_data = []
+            for pixel in pixels:
+                flat_data.extend([c / 255.0 for c in pixel])
+
+            print(f"[DEBUG] Creating texture with {len(flat_data)} values...")
+
+            # Create texture
+            with dpg.texture_registry():
+                texture_id = dpg.add_static_texture(
+                    width=width,
+                    height=height,
+                    default_value=flat_data,
+                )
+
+            print(f"[DEBUG] Texture created: {texture_id}")
+            return texture_id
+
+        except httpx.HTTPError as e:
+            print(f"[ERROR] HTTP error loading image: {e}")
+            return None
+        except Exception as e:
+            import traceback
+            print(f"[ERROR] Failed to load image: {e}")
+            traceback.print_exc()
+            return None
+
     def _update_images_display(self):
         """Update the image display panels"""
+        print(f"[DEBUG] _update_images_display called")
+        print(f"[DEBUG] generated_images: characters={len(self.generated_images.get('characters', []))}, locations={len(self.generated_images.get('locations', []))}, scenes={len(self.generated_images.get('scenes', []))}")
+
         # Update character images
         dpg.delete_item("char_images_panel", children_only=True)
         if self.generated_images.get("characters"):
             for img in self.generated_images["characters"]:
+                print(f"[DEBUG] Loading character image: {img.url[:80] if img.url else 'NO URL'}...")
                 with dpg.group(parent="char_images_panel"):
                     dpg.add_text(f"角色: {img.reference_id}", color=(100, 200, 150))
-                    dpg.add_text(f"URL: {img.url[:50]}...", color=(150, 150, 150))
+
+                    if img.url:
+                        # Try to load and display image
+                        texture_id = self._load_image_from_url(img.url, max_width=200)
+                        if texture_id:
+                            dpg.add_image(texture_id)
+                            print(f"[DEBUG] Character image loaded successfully, texture_id={texture_id}")
+                        else:
+                            dpg.add_text(f"[图片加载失败]", color=(255, 100, 100))
+                            dpg.add_text(f"URL: {img.url[:80]}", color=(150, 150, 150), wrap=280)
+                    else:
+                        dpg.add_text(f"[无图片URL]", color=(255, 100, 100))
+
+                    if img.prompt:
+                        prompt_text = img.prompt[:60] + "..." if len(img.prompt) > 60 else img.prompt
+                        dpg.add_text(f"Prompt: {prompt_text}", color=(120, 120, 120), wrap=280)
                     dpg.add_separator()
         else:
             dpg.add_text("暂无角色图片", parent="char_images_panel", color=(150, 150, 150))
@@ -783,9 +888,24 @@ class PAVUIApp:
         dpg.delete_item("loc_images_panel", children_only=True)
         if self.generated_images.get("locations"):
             for img in self.generated_images["locations"]:
+                print(f"[DEBUG] Loading location image: {img.url[:80] if img.url else 'NO URL'}...")
                 with dpg.group(parent="loc_images_panel"):
                     dpg.add_text(f"场景: {img.reference_id}", color=(100, 200, 150))
-                    dpg.add_text(f"URL: {img.url[:50]}...", color=(150, 150, 150))
+
+                    if img.url:
+                        texture_id = self._load_image_from_url(img.url, max_width=400)
+                        if texture_id:
+                            dpg.add_image(texture_id)
+                            print(f"[DEBUG] Location image loaded successfully, texture_id={texture_id}")
+                        else:
+                            dpg.add_text(f"[图片加载失败]", color=(255, 100, 100))
+                            dpg.add_text(f"URL: {img.url[:80]}", color=(150, 150, 150), wrap=400)
+                    else:
+                        dpg.add_text(f"[无图片URL]", color=(255, 100, 100))
+
+                    if img.prompt:
+                        prompt_text = img.prompt[:80] + "..." if len(img.prompt) > 80 else img.prompt
+                        dpg.add_text(f"Prompt: {prompt_text}", color=(120, 120, 120), wrap=400)
                     dpg.add_separator()
         else:
             dpg.add_text("暂无场景图片", parent="loc_images_panel", color=(150, 150, 150))
@@ -794,32 +914,52 @@ class PAVUIApp:
         dpg.delete_item("scene_images_panel", children_only=True)
         if self.generated_images.get("scenes"):
             for img in self.generated_images["scenes"]:
+                print(f"[DEBUG] Loading scene image: {img.url[:80] if img.url else 'NO URL'}...")
                 with dpg.group(parent="scene_images_panel"):
                     dpg.add_text(f"分镜: {img.reference_id}", color=(100, 200, 150))
-                    dpg.add_text(f"URL: {img.url[:50]}...", color=(150, 150, 150))
+
+                    if img.url:
+                        texture_id = self._load_image_from_url(img.url, max_width=500)
+                        if texture_id:
+                            dpg.add_image(texture_id)
+                            print(f"[DEBUG] Scene image loaded successfully, texture_id={texture_id}")
+                        else:
+                            dpg.add_text(f"[图片加载失败]", color=(255, 100, 100))
+                            dpg.add_text(f"URL: {img.url[:80]}", color=(150, 150, 150), wrap=500)
+                    else:
+                        dpg.add_text(f"[无图片URL]", color=(255, 100, 100))
+
+                    if img.prompt:
+                        prompt_text = img.prompt[:100] + "..." if len(img.prompt) > 100 else img.prompt
+                        dpg.add_text(f"Prompt: {prompt_text}", color=(120, 120, 120), wrap=500)
                     dpg.add_separator()
         else:
             dpg.add_text("暂无分镜图片", parent="scene_images_panel", color=(150, 150, 150))
 
     def _on_test_jimeng(self, sender, app_data):
-        """Test Jimeng API connection"""
+        """Test Jimeng API connection (from image tab)"""
+        # Check if adapter has credentials
         if self.jimeng_adapter.access_key and self.jimeng_adapter.secret_key:
             dpg.set_value("jimeng_status", "已配置")
             dpg.configure_item("jimeng_status", color=(100, 255, 100))
         else:
-            dpg.set_value("jimeng_status", "未配置")
+            dpg.set_value("jimeng_status", "未配置 - 请在设置Tab中配置")
             dpg.configure_item("jimeng_status", color=(255, 100, 100))
 
     def _on_save_jimeng(self, sender, app_data):
-        """Save and test Jimeng API credentials"""
+        """Save and test Jimeng API credentials (from settings tab)"""
         ak = dpg.get_value("jimeng_ak_input")
         sk = dpg.get_value("jimeng_sk_input")
 
         if not ak or not sk:
             dpg.set_value("jimeng_test_result", "请输入完整密钥")
+            dpg.configure_item("jimeng_test_result", color=(255, 100, 100))
             return
 
-        # Update adapter
+        dpg.set_value("jimeng_test_result", "正在测试连接...")
+        dpg.configure_item("jimeng_test_result", color=(255, 200, 100))
+
+        # Update adapter with new credentials
         self.jimeng_adapter = JimengAdapter(
             access_key=ak,
             secret_key=sk,
@@ -827,10 +967,50 @@ class PAVUIApp:
         )
         self.image_service = ImageService(self.jimeng_adapter)
 
-        # Update status
-        dpg.set_value("jimeng_status", "已配置")
-        dpg.configure_item("jimeng_status", color=(100, 255, 100))
-        dpg.set_value("jimeng_test_result", "已保存")
+        # Test connection in background thread
+        def test_thread():
+            try:
+                if self.jimeng_adapter.service is None:
+                    dpg.set_value("jimeng_test_result", "SDK初始化失败")
+                    dpg.configure_item("jimeng_test_result", color=(255, 100, 100))
+                    return
+
+                # Try a simple API call to verify credentials
+                # Submit a minimal test task (will fail but verifies auth)
+                test_body = {
+                    "req_key": "jimeng_t2i_v40",
+                    "prompt": "test",
+                    "width": 512,
+                    "height": 512,
+                }
+                response = self.jimeng_adapter.service.cv_sync2async_submit_task(test_body)
+
+                code = response.get("code", 0)
+                if code == 10000:
+                    # Success - task was submitted (we should cancel it but API doesn't support)
+                    dpg.set_value("jimeng_test_result", "连接成功 ✓")
+                    dpg.configure_item("jimeng_test_result", color=(100, 255, 100))
+                    dpg.set_value("jimeng_status", "已配置")
+                    dpg.configure_item("jimeng_status", color=(100, 255, 100))
+                elif code == 50001 or "auth" in str(response.get("message", "")).lower():
+                    dpg.set_value("jimeng_test_result", "认证失败 - 检查密钥")
+                    dpg.configure_item("jimeng_test_result", color=(255, 100, 100))
+                else:
+                    # Other error but connection works
+                    msg = response.get("message", "未知错误")[:20]
+                    dpg.set_value("jimeng_test_result", f"已保存 ({msg})")
+                    dpg.configure_item("jimeng_test_result", color=(255, 200, 100))
+                    dpg.set_value("jimeng_status", "已配置")
+                    dpg.configure_item("jimeng_status", color=(100, 255, 100))
+
+            except Exception as e:
+                error_msg = str(e)[:30]
+                dpg.set_value("jimeng_test_result", f"错误: {error_msg}")
+                dpg.configure_item("jimeng_test_result", color=(255, 100, 100))
+
+        thread = threading.Thread(target=test_thread)
+        thread.daemon = True
+        thread.start()
 
     def _on_test_connection(self, sender, app_data):
         """Test API connection"""
