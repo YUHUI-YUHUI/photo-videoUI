@@ -81,7 +81,6 @@ class PAVUIApp:
             # Check for pending image updates (from background thread)
             if self._pending_image_update:
                 self._pending_image_update = False
-                print("[DEBUG] Processing pending image update on main thread...")
                 self._update_images_display()
                 dpg.set_value("img_progress_text", "图片生成完成！")
 
@@ -93,15 +92,17 @@ class PAVUIApp:
         """Setup Chinese font for proper display"""
         # Try to find a Chinese font
         font_paths = [
+            # Windows native paths
+            "C:/Windows/Fonts/msyh.ttc",           # 微软雅黑
+            "C:/Windows/Fonts/simsun.ttc",         # 宋体
+            "C:/Windows/Fonts/simhei.ttf",         # 黑体
             # WSL - Windows fonts
-            "/mnt/c/Windows/Fonts/msyh.ttc",      # 微软雅黑
-            "/mnt/c/Windows/Fonts/simsun.ttc",    # 宋体
-            "/mnt/c/Windows/Fonts/simhei.ttf",    # 黑体
+            "/mnt/c/Windows/Fonts/msyh.ttc",
+            "/mnt/c/Windows/Fonts/simsun.ttc",
+            "/mnt/c/Windows/Fonts/simhei.ttf",
             # Linux common paths
             "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
             "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-            # Project local font
-            str(Path(__file__).parent.parent.parent / "assets/fonts/NotoSansSC.otf"),
         ]
 
         font_path = None
@@ -732,7 +733,6 @@ class PAVUIApp:
         dpg.configure_item("generate_images_btn", enabled=False)
 
         # Debug: check script contents
-        print(f"[DEBUG] current_script has: {len(self.current_script.characters)} characters, {len(self.current_script.locations)} locations, {len(self.current_script.scenes)} scenes")
 
         dpg.set_value("img_progress_text", "开始生成图片...")
 
@@ -775,10 +775,8 @@ class PAVUIApp:
             loop.close()
 
             self.generated_images = results
-            print(f"[DEBUG] Image generation complete: {len(results.get('characters', []))} characters, {len(results.get('locations', []))} locations, {len(results.get('scenes', []))} scenes")
             for img_type, imgs in results.items():
                 for img in imgs:
-                    print(f"[DEBUG] {img_type}: {img.reference_id} -> {img.url[:60]}...")
 
             # Schedule UI update on main thread
             self._pending_image_update = True
@@ -792,23 +790,28 @@ class PAVUIApp:
             dpg.configure_item("generate_images_btn", enabled=True)
 
     def _load_image_from_url(self, url: str, max_width: int = 300) -> int | None:
-        """Download image from URL and create DearPyGui texture
+        """Load image from URL or local file path and create DearPyGui texture
 
         Returns texture_id or None if failed
         """
         try:
             from PIL import Image
+            import io as _io
 
-            print(f"[DEBUG] Downloading image from: {url[:80]}...")
 
-            # Download image
-            response = httpx.get(url, timeout=30.0)
-            response.raise_for_status()
-            print(f"[DEBUG] Downloaded {len(response.content)} bytes")
+            # Check if it's a local file path
+            from pathlib import Path as _Path
+            p = _Path(url)
+            if p.exists() and p.is_file():
+                img_bytes = p.read_bytes()
+            else:
+                # Download image
+                response = httpx.get(url, timeout=30.0)
+                response.raise_for_status()
+                img_bytes = response.content
 
             # Load with PIL
-            img = Image.open(io.BytesIO(response.content))
-            print(f"[DEBUG] Image loaded: {img.size}, mode={img.mode}")
+            img = Image.open(_io.BytesIO(img_bytes))
 
             # Convert to RGBA
             if img.mode != "RGBA":
@@ -822,7 +825,6 @@ class PAVUIApp:
                 img = img.resize(new_size, Image.Resampling.LANCZOS)
 
             width, height = img.size
-            print(f"[DEBUG] Resized to: {width}x{height}")
 
             # Convert to flat list of floats (0-1 range)
             pixels = list(img.getdata())
@@ -830,7 +832,6 @@ class PAVUIApp:
             for pixel in pixels:
                 flat_data.extend([c / 255.0 for c in pixel])
 
-            print(f"[DEBUG] Creating texture with {len(flat_data)} values...")
 
             # Create texture
             with dpg.texture_registry():
@@ -840,28 +841,22 @@ class PAVUIApp:
                     default_value=flat_data,
                 )
 
-            print(f"[DEBUG] Texture created: {texture_id}")
             return texture_id
 
         except httpx.HTTPError as e:
-            print(f"[ERROR] HTTP error loading image: {e}")
             return None
         except Exception as e:
             import traceback
-            print(f"[ERROR] Failed to load image: {e}")
             traceback.print_exc()
             return None
 
     def _update_images_display(self):
         """Update the image display panels"""
-        print(f"[DEBUG] _update_images_display called")
-        print(f"[DEBUG] generated_images: characters={len(self.generated_images.get('characters', []))}, locations={len(self.generated_images.get('locations', []))}, scenes={len(self.generated_images.get('scenes', []))}")
 
         # Update character images
         dpg.delete_item("char_images_panel", children_only=True)
         if self.generated_images.get("characters"):
             for img in self.generated_images["characters"]:
-                print(f"[DEBUG] Loading character image: {img.url[:80] if img.url else 'NO URL'}...")
                 with dpg.group(parent="char_images_panel"):
                     dpg.add_text(f"角色: {img.reference_id}", color=(100, 200, 150))
 
@@ -870,7 +865,6 @@ class PAVUIApp:
                         texture_id = self._load_image_from_url(img.url, max_width=200)
                         if texture_id:
                             dpg.add_image(texture_id)
-                            print(f"[DEBUG] Character image loaded successfully, texture_id={texture_id}")
                         else:
                             dpg.add_text(f"[图片加载失败]", color=(255, 100, 100))
                             dpg.add_text(f"URL: {img.url[:80]}", color=(150, 150, 150), wrap=280)
@@ -888,7 +882,6 @@ class PAVUIApp:
         dpg.delete_item("loc_images_panel", children_only=True)
         if self.generated_images.get("locations"):
             for img in self.generated_images["locations"]:
-                print(f"[DEBUG] Loading location image: {img.url[:80] if img.url else 'NO URL'}...")
                 with dpg.group(parent="loc_images_panel"):
                     dpg.add_text(f"场景: {img.reference_id}", color=(100, 200, 150))
 
@@ -896,7 +889,6 @@ class PAVUIApp:
                         texture_id = self._load_image_from_url(img.url, max_width=400)
                         if texture_id:
                             dpg.add_image(texture_id)
-                            print(f"[DEBUG] Location image loaded successfully, texture_id={texture_id}")
                         else:
                             dpg.add_text(f"[图片加载失败]", color=(255, 100, 100))
                             dpg.add_text(f"URL: {img.url[:80]}", color=(150, 150, 150), wrap=400)
@@ -914,7 +906,6 @@ class PAVUIApp:
         dpg.delete_item("scene_images_panel", children_only=True)
         if self.generated_images.get("scenes"):
             for img in self.generated_images["scenes"]:
-                print(f"[DEBUG] Loading scene image: {img.url[:80] if img.url else 'NO URL'}...")
                 with dpg.group(parent="scene_images_panel"):
                     dpg.add_text(f"分镜: {img.reference_id}", color=(100, 200, 150))
 
@@ -922,7 +913,6 @@ class PAVUIApp:
                         texture_id = self._load_image_from_url(img.url, max_width=500)
                         if texture_id:
                             dpg.add_image(texture_id)
-                            print(f"[DEBUG] Scene image loaded successfully, texture_id={texture_id}")
                         else:
                             dpg.add_text(f"[图片加载失败]", color=(255, 100, 100))
                             dpg.add_text(f"URL: {img.url[:80]}", color=(150, 150, 150), wrap=500)

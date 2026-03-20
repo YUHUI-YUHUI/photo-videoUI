@@ -204,16 +204,12 @@ class ImageService:
 
         character_refs = {}
 
-        # Debug: print script contents
-        print(f"[DEBUG] Script has {len(script.characters)} characters, {len(script.locations)} locations, {len(script.scenes)} scenes")
-
         # Generate character reference images
         if generate_characters:
             if on_progress:
                 on_progress(f"开始生成角色参考图... (共{len(script.characters)}个)")
 
             for char in script.characters:
-                print(f"[DEBUG] Generating image for character: {char.name}")
                 try:
                     image = await self.generate_character_reference(
                         char, style, "3:4", on_progress
@@ -228,9 +224,6 @@ class ImageService:
                     results["characters"].append(image)
                     character_refs[char.id] = image.url
                 except Exception as e:
-                    print(f"[ERROR] Character {char.name} generation failed: {e}")
-                    import traceback
-                    traceback.print_exc()
                     if on_progress:
                         on_progress(f"角色 {char.name} 生成失败: {str(e)[:30]}")
 
@@ -240,7 +233,6 @@ class ImageService:
                 on_progress(f"开始生成场景参考图... (共{len(script.locations)}个)")
 
             for loc in script.locations:
-                print(f"[DEBUG] Generating image for location: {loc.name}")
                 try:
                     image = await self.generate_location_reference(
                         loc, style, aspect_ratio, on_progress
@@ -254,9 +246,6 @@ class ImageService:
                             on_progress(f"已保存: {local_path.name}")
                     results["locations"].append(image)
                 except Exception as e:
-                    print(f"[ERROR] Location {loc.name} generation failed: {e}")
-                    import traceback
-                    traceback.print_exc()
                     if on_progress:
                         on_progress(f"场景 {loc.name} 生成失败: {str(e)[:30]}")
 
@@ -285,9 +274,6 @@ class ImageService:
                             on_progress(f"已保存: {local_path.name}")
                     results["scenes"].append(image)
                 except Exception as e:
-                    print(f"[ERROR] Scene {scene.scene_id} generation failed: {e}")
-                    import traceback
-                    traceback.print_exc()
                     if on_progress:
                         on_progress(f"分镜 {scene.scene_id} 生成失败: {str(e)[:30]}")
 

@@ -1,8 +1,12 @@
 """Jimeng (即梦) Image Generation Adapter"""
 
 import asyncio
+import base64
+import json
+import tempfile
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable
 
 import httpx
@@ -40,14 +44,13 @@ class JimengAdapter:
         "jimeng_i2i_v40": "即梦4.0 图生图",
     }
 
-    # Aspect ratios - must use dimensions supported by Jimeng 4.0 API
-    # Supported: 1024x1024, 1024x576, 576x1024, 1024x768, 768x1024, 1024x682, 682x1024
+    # Aspect ratios - jimeng_t2i_v40 only supports 1024x1024
     ASPECT_RATIOS = {
         "1:1": (1024, 1024),
-        "16:9": (1024, 576),
-        "9:16": (576, 1024),
-        "4:3": (1024, 768),
-        "3:4": (768, 1024),
+        "16:9": (1024, 1024),
+        "9:16": (1024, 1024),
+        "4:3": (1024, 1024),
+        "3:4": (1024, 1024),
     }
 
     def __init__(
@@ -104,7 +107,6 @@ class JimengAdapter:
 
         # Get dimensions from aspect ratio
         width, height = self.ASPECT_RATIOS.get(aspect_ratio, (1024, 1024))
-        print(f"[DEBUG] Jimeng API: aspect_ratio={aspect_ratio}, width={width}, height={height}")
 
         # Determine model based on whether we have a reference image
         req_key = "jimeng_i2i_v40" if reference_image_url else self.model
@@ -128,7 +130,6 @@ class JimengAdapter:
         if seed is not None:
             body["seed"] = seed
 
-        print(f"[DEBUG] Jimeng API submit body: {body}")
 
         # Submit task
         task_id = await self._submit_task(body)
@@ -144,12 +145,8 @@ class JimengAdapter:
     async def _submit_task(self, body: dict) -> str:
         """Submit async task and return task_id"""
         if self.service:
-            # Use SDK
-            response = await asyncio.to_thread(
-                self._sync_submit_task, body
-            )
+            response = await asyncio.to_thread(self._sync_submit_task, body)
         else:
-            # Manual HTTP request
             response = await self._http_submit_task(body)
 
         if response.get("code") != 10000:
@@ -159,7 +156,20 @@ class JimengAdapter:
 
     def _sync_submit_task(self, body: dict) -> dict:
         """Synchronous task submission using SDK"""
-        return self.service.cv_sync2async_submit_task(body)
+        try:
+            return self.service.cv_sync2async_submit_task(body)
+        except Exception as e:
+            return self._decode_sdk_exception(e)
+
+    def _decode_sdk_exception(self, e: Exception) -> dict:
+        """Decode volcengine SDK exceptions that wrap raw bytes responses"""
+        raw = e.args[0] if e.args else b""
+        if isinstance(raw, bytes):
+            try:
+                return json.loads(raw)
+            except Exception:
+                return {"code": -1, "message": raw.decode("utf-8", errors="replace")}
+        return {"code": -1, "message": str(e)}
 
     async def _http_submit_task(self, body: dict) -> dict:
         """Submit task via HTTP (fallback)"""
@@ -182,42 +192,22 @@ class JimengAdapter:
 
         while time.time() - start_time < max_wait:
             if self.service:
-                response = await asyncio.to_thread(
-                    self._sync_get_result, task_id, req_key
-                )
+                response = await asyncio.to_thread(self._sync_get_result, task_id, req_key)
             else:
                 raise NotImplementedError("SDK required")
 
-            # Log full response for debugging
-            print(f"[DEBUG] Poll response code: {response.get('code')}, message: {response.get('message', '')}")
 
             data = response.get("data", {})
             if not data:
-                print(f"[DEBUG] No data in response: {response}")
                 await asyncio.sleep(poll_interval)
                 continue
 
             status = data.get("status", "")
-            print(f"[DEBUG] Status: {status}, data keys: {list(data.keys())}")
 
             if status == "done":
-                # Task completed - according to docs, image_urls is a string array
-                image_urls = data.get("image_urls", [])
-                print(f"[DEBUG] image_urls: {image_urls}")
-
-                if not image_urls:
-                    # Maybe the field name is different, print all data
-                    print(f"[DEBUG] Full data: {data}")
-                    raise Exception(f"No image_urls in response. Data keys: {list(data.keys())}")
-
-                # image_urls should be a list of URL strings
-                image_url = image_urls[0] if image_urls else ""
-
+                image_url = self._extract_image_url(data)
                 if not image_url:
-                    raise Exception(f"Empty image URL")
-
-                print(f"[DEBUG] Success! Image URL: {image_url[:80]}...")
-
+                    raise Exception(f"No image data in response. Keys: {list(data.keys())}")
                 return ImageResult(
                     image_url=image_url,
                     width=data.get("width", 1024),
@@ -229,23 +219,51 @@ class JimengAdapter:
             elif status == "failed":
                 raise Exception(f"Image generation failed: {response.get('message', '')}")
 
-            elif status in ("running", "pending"):
+            elif status in ("running", "pending", "in_queue"):
                 if on_progress:
                     on_progress(f"生成中... ({int(time.time() - start_time)}秒)")
                 await asyncio.sleep(poll_interval)
 
             else:
-                # Unknown status, keep waiting
                 await asyncio.sleep(poll_interval)
 
         raise TimeoutError(f"Image generation timed out after {max_wait}s")
 
+    def _extract_image_url(self, data: dict) -> str:
+        """Extract image URL from response data, falling back to base64 if needed"""
+        # Try image_urls first
+        image_urls = data.get("image_urls") or []
+        if image_urls and image_urls[0]:
+            return image_urls[0]
+
+        # Fall back to binary_data_base64
+        b64_list = data.get("binary_data_base64") or []
+        if b64_list and b64_list[0]:
+            return self._save_base64_to_temp(b64_list[0])
+
+        return ""
+
+    def _save_base64_to_temp(self, b64_data: str) -> str:
+        """Decode base64 image and save to temp file, return file path"""
+        img_bytes = base64.b64decode(b64_data)
+        suffix = ".png"
+        # Detect JPEG
+        if img_bytes[:2] == b"\xff\xd8":
+            suffix = ".jpg"
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix, prefix="jimeng_")
+        tmp.write(img_bytes)
+        tmp.close()
+        return tmp.name
+
     def _sync_get_result(self, task_id: str, req_key: str = "jimeng_t2i_v40") -> dict:
         """Synchronous result retrieval using SDK"""
-        return self.service.cv_sync2async_get_result({
-            "req_key": req_key,
-            "task_id": task_id,
-        })
+        try:
+            return self.service.cv_sync2async_get_result({
+                "req_key": req_key,
+                "task_id": task_id,
+            })
+        except Exception as e:
+            return self._decode_sdk_exception(e)
 
     async def test_connection(self) -> bool:
         """Test if the adapter is properly configured"""
